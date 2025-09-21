@@ -1,0 +1,7 @@
+variables:
+  CURRENT_BRANCH_NAME: sk_content-ci-cd-template #"${INFRA_BRANCH}"
+
+include:
+  - file: "/.gitlab/ci/content-ci-cd-template/.gitlab-ci.yml"
+    ref: sk_content-ci-cd-template #"${INFRA_BRANCH}"
+    project: "${CI_PROJECT_NAMESPACE}/infra"
