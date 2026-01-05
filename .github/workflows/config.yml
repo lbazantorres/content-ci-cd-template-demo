@@ -82,6 +82,8 @@ jobs:
           else
             echo "No packs has changed, skipping step."
           fi
+      - name: Install bucket upload deps
+        run: python -m pip install --upgrade pip prettytable
       - name: Upload Packs to Artifacts Server
         # In case 2 below (UPLOAD DIRECTLY TO YOUR XSOAR MACHINE) needed to add these secrets and variables
         # For more information - https://docs-cortex.paloaltonetworks.com/r/1/Demisto-SDK-Guide/Environment-variables-setup
