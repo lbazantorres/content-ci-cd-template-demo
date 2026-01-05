@@ -1,6 +1,7 @@
 name: XSOAR CI/CD
 on:
   push:
+  workflow_dispatch:
 
 jobs:
   build:
@@ -9,6 +10,8 @@ jobs:
       BRANCH_NAME: ${{ github.ref_name }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       DEMISTO_README_VALIDATION: "false"
+      BEFORE_SHA: ${{ github.event.before }}
+      GITHUB_SHA: ${{ github.sha }}
 
     steps:
       - name: XSOAR CI/CD master checkout
@@ -21,6 +24,7 @@ jobs:
         with:
           repository: demisto/content
           path: content
+          fetch-depth: 0
 
       - name: Install poetry
         uses: Gr1N/setup-poetry@v9
@@ -36,27 +40,48 @@ jobs:
           poetry config virtualenvs.in-project true
           poetry install --no-interaction
 
-      - name: Prepare Environment
+      - name: Prepare Environment (debug)
         run: |
-          echo "PATH=/home/runner/.local/bin:$PATH" >> $GITHUB_ENV
-          echo "PYTHONPATH=${GITHUB_WORKSPACE}/content:${GITHUB_WORKSPACE}:${PYTHONPATH}" >> $GITHUB_ENV
+          set -euo pipefail
+          set -x
 
+          # Where prepare-content will place artifacts (zips)
           mkdir -p "${GITHUB_WORKSPACE}/content/new_packs_zips"
           echo "NEW_PACKS_FOLDER=${GITHUB_WORKSPACE}/content/new_packs_zips" >> $GITHUB_ENV
 
-          # IMPORTANT: fetch default branch so Git can resolve it
+          # Make sure default branch ref exists locally
           git fetch origin "${DEFAULT_BRANCH}" --prune
 
-          # Calculate changed packs using Poetry env (so demisto_sdk exists)
-          PACKS_CHANGED=$(poetry run python "$GITHUB_WORKSPACE/build_related_scripts/get_modified_packs.py" \
-            --repo_path "$GITHUB_WORKSPACE/" \
-            --prev-ver "origin/${DEFAULT_BRANCH}" | tr -d '\n')
+          echo "===== DEBUG: Branch/SHAs ====="
+          echo "BRANCH_NAME=${BRANCH_NAME}"
+          echo "DEFAULT_BRANCH=${DEFAULT_BRANCH}"
+          echo "BEFORE_SHA=${BEFORE_SHA:-}"
+          echo "GITHUB_SHA=${GITHUB_SHA:-}"
 
+          # Decide diff range:
+          # - On push: use BEFORE_SHA..GITHUB_SHA
+          # - On workflow_dispatch: fallback to origin/DEFAULT_BRANCH...HEAD
+          if [ -n "${BEFORE_SHA:-}" ] && [ "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
+            RANGE="${BEFORE_SHA}..${GITHUB_SHA}"
+          else
+            RANGE="origin/${DEFAULT_BRANCH}...HEAD"
+          fi
+
+          echo "DEBUG: Using RANGE=${RANGE}"
+
+          # Get changed packs from THIS repo (where your Packs/ folder lives)
+          CHANGED_FILES="$(git diff --name-only ${RANGE} || true)"
+          echo "DEBUG: Changed files:"
+          echo "${CHANGED_FILES}" || true
+
+          PACKS_CHANGED="$(echo "${CHANGED_FILES}" | awk -F/ '/^Packs\//{print $1"/"$2}' | sort -u | tr '\n' ' ' | xargs || true)"
           echo "PACKS_CHANGED=${PACKS_CHANGED}" >> $GITHUB_ENV
           echo "DEBUG: PACKS_CHANGED='${PACKS_CHANGED}'"
 
       - name: Prepare Venv
         run: |
+          set -euo pipefail
+          set -x
           cd "$GITHUB_WORKSPACE/content/"
 
           # Install node packages (fase mantenida)
@@ -65,46 +90,64 @@ jobs:
           git config diff.renameLimit 6000
           echo "========== Build Parameters =========="
           python --version
-          # demisto-sdk desde Poetry (no depende de activate)
           cd "$GITHUB_WORKSPACE"
           poetry run demisto-sdk --version
           echo "====================================="
 
-      - name: Create Packs Artifacts
+      - name: Create Packs Artifacts (debug)
         run: |
-          if [ -n "$PACKS_CHANGED" ]; then
-            # prepare-content crea los zips en NEW_PACKS_FOLDER
+          set -euo pipefail
+          set -x
+
+          echo "PACKS_CHANGED='${PACKS_CHANGED:-}'"
+          echo "NEW_PACKS_FOLDER='${NEW_PACKS_FOLDER:-}'"
+
+          if [ -n "${PACKS_CHANGED:-}" ]; then
+            # prepare-content creates the zips in NEW_PACKS_FOLDER
             poetry run demisto-sdk prepare-content --input "$PACKS_CHANGED" --output "$NEW_PACKS_FOLDER"
             echo "Artifacts generated at: $NEW_PACKS_FOLDER"
             ls -la "$NEW_PACKS_FOLDER" || true
           else
-            echo "No packs has changed, skipping step. "
+            echo "No packs has changed, skipping step."
           fi
 
       - name: Install bucket upload deps
         run: |
-          # Fase mantenida: si usas bucket_upload.py, necesita estas dependencias
           python -m pip install --upgrade pip prettytable google-cloud-storage
 
-      - name: Upload Packs to Artifacts Server
+      - name: Upload Packs to XSOAR (debug)
         env:
           DEMISTO_BASE_URL: ${{ secrets.DEMISTO_BASE_URL }}
           DEMISTO_API_KEY: ${{ secrets.DEMISTO_API_KEY }}
           XSIAM_AUTH_ID: ${{ vars.XSIAM_AUTH_ID }}
         run: |
-          if [ -n "$PACKS_CHANGED" ]; then
-            if [ "$BRANCH_NAME" = "$DEFAULT_BRANCH" ]; then
+          set -euo pipefail
+          set -x
+
+          echo "===== DEBUG Upload ====="
+          echo "BRANCH_NAME=${BRANCH_NAME}"
+          echo "DEFAULT_BRANCH=${DEFAULT_BRANCH}"
+          echo "PACKS_CHANGED='${PACKS_CHANGED:-}'"
+          echo "NEW_PACKS_FOLDER='${NEW_PACKS_FOLDER:-}'"
+          echo "DEMISTO_BASE_URL set? $([ -n "${DEMISTO_BASE_URL:-}" ] && echo yes || echo no)"
+          echo "DEMISTO_API_KEY set? $([ -n "${DEMISTO_API_KEY:-}" ] && echo yes || echo no)"
+          echo "XSIAM_AUTH_ID='${XSIAM_AUTH_ID:-}'"
+          poetry run demisto-sdk --version || true
+
+          if [ -n "${PACKS_CHANGED:-}" ]; then
+            if [ "${BRANCH_NAME}" = "${DEFAULT_BRANCH}" ]; then
               echo "Uploading artifacts ${PACKS_CHANGED}."
-              echo "NEW_PACKS_FOLDER=$NEW_PACKS_FOLDER"
               ls -la "$NEW_PACKS_FOLDER" || { echo "Folder not found: $NEW_PACKS_FOLDER"; exit 1; }
 
-              # 2) UPLOAD DIRECTLY TO YOUR XSOAR MACHINE
-              for pack in "$NEW_PACKS_FOLDER"/*; do
-                # evita intentar subir si no hay archivos
-                [ -e "$pack" ] || { echo "No artifacts found to upload in $NEW_PACKS_FOLDER"; exit 0; }
-                poetry run demisto-sdk upload --input "$pack"
-              done
+              echo "Artifacts to upload:"
+              find "$NEW_PACKS_FOLDER" -maxdepth 1 -type f -print || true
 
+              for pack in "$NEW_PACKS_FOLDER"/*; do
+                [ -e "$pack" ] || { echo "No artifacts found to upload in $NEW_PACKS_FOLDER"; exit 0; }
+                echo "Uploading: $pack"
+                ls -lh "$pack" || true
+                poetry run demisto-sdk upload --input "$pack" --verbose
+              done
             else
               echo "The current branch is not the default branch, skipping upload to server."
             fi
