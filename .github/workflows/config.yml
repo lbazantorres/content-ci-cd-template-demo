@@ -38,27 +38,22 @@ jobs:
 
       - name: Prepare Environment
         run: |
-          echo "DEBUG: git status"
-          git status --porcelain || true
-          echo "DEBUG: diff files"
-          git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" || true
-
-          # No uses `source .../activate` aquí: no persiste a otros steps.
           echo "PATH=/home/runner/.local/bin:$PATH" >> $GITHUB_ENV
           echo "PYTHONPATH=${GITHUB_WORKSPACE}/content:${GITHUB_WORKSPACE}:${PYTHONPATH}" >> $GITHUB_ENV
 
-          # Asegura que existe la carpeta de artifacts
           mkdir -p "${GITHUB_WORKSPACE}/content/new_packs_zips"
           echo "NEW_PACKS_FOLDER=${GITHUB_WORKSPACE}/content/new_packs_zips" >> $GITHUB_ENV
 
-          # Detecta packs modificados (asegura una sola línea)
-          PACKS_CHANGED=$(poetry run python "$GITHUB_WORKSPACE/build_related_scripts/get_modified_packs.py" --repo_path "$GITHUB_WORKSPACE/content" --prev-ver "${DEFAULT_BRANCH}" | tr -d '\n')
+          # IMPORTANT: fetch default branch so Git can resolve it
+          git fetch origin "${DEFAULT_BRANCH}" --prune
+
+          # Calculate changed packs using Poetry env (so demisto_sdk exists)
+          PACKS_CHANGED=$(poetry run python "$GITHUB_WORKSPACE/build_related_scripts/get_modified_packs.py" \
+            --repo_path "$GITHUB_WORKSPACE/" \
+            --prev-ver "origin/${DEFAULT_BRANCH}" | tr -d '\n')
+
           echo "PACKS_CHANGED=${PACKS_CHANGED}" >> $GITHUB_ENV
-          echo "PACKS_CHANGED=${PACKS_CHANGED}"
-
           echo "DEBUG: PACKS_CHANGED='${PACKS_CHANGED}'"
-          poetry run python -c "import demisto_sdk; print('demisto_sdk OK')"
-
 
       - name: Prepare Venv
         run: |
@@ -83,7 +78,7 @@ jobs:
             echo "Artifacts generated at: $NEW_PACKS_FOLDER"
             ls -la "$NEW_PACKS_FOLDER" || true
           else
-            echo "No packs has changed, skipping step."
+            echo "No packs has changed, skipping step. "
           fi
 
       - name: Install bucket upload deps
